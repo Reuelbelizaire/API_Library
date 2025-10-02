@@ -1,0 +1,159 @@
+function syncAppData() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]; // Row 1 headers
+  const lastRow = sheet.getLastRow();
+
+  for (let row = 11; row <= lastRow; row++) {
+    let rowValues = sheet.getRange(row, 1, 1, headers.length).getValues()[0];
+    let store = (rowValues[headers.indexOf('store')] || '').toLowerCase();
+    let appId = rowValues[headers.indexOf('app_id')];
+    let appName = rowValues[headers.indexOf('app_name')];
+
+    // Try to search app ID if missing ** still working on app name search **
+    if (!appId && appName && store) {
+      try {
+        const searchUrl = "https://app-store-and-google-play-api.p.rapidapi.com/v1/" +
+                          (store === "apple" ? "app-store" : "google-play") +
+                          "/search?text=" + encodeURIComponent(appName) + "&country=us&language=en";
+
+        const options = {
+          method: "get",
+          headers: {
+            "x-rapidapi-key": "#Your Rapid Key API#",
+            "x-rapidapi-host": "app-store-and-google-play-api.p.rapidapi.com"
+          }
+        };
+
+        const searchResponse = UrlFetchApp.fetch(searchUrl, options);
+        const searchResults = JSON.parse(searchResponse.getContentText());
+
+        if (searchResults && Array.isArray(searchResults.data) && searchResults.data.length > 0) {
+          const firstApp = searchResults.data[0];
+          appId = (store === "apple") ? firstApp.id : firstApp.bundle_id;
+          sheet.getRange(row, headers.indexOf('app_id') + 1).setValue(appId); // Update ID in sheet
+        } else {
+          Logger.log(`No app found for "${appName}" in row ${row}`);
+          continue;
+        }
+      } catch (searchErr) {
+        Logger.log(`Search failed for row ${row}: ${searchErr.message}`);
+        continue;
+      }
+    }
+
+    if (!store || !appId) {
+      Logger.log(`Missing store or app_id in row ${row}`);
+      continue;
+    }
+
+    try {
+      let newData = {};
+
+      if (store === 'apple') {
+  const url = `https://itunes.apple.com/lookup?id=${appId}`;
+  const response = UrlFetchApp.fetch(url);
+  const app = JSON.parse(response.getContentText()).results[0];
+
+  if (!app) {
+    Logger.log(`No data for Apple app ID ${appId}`);
+    continue;
+  }
+
+  // Debug: Log what screenshots are available for this specific app
+  Logger.log(`App: ${app.trackName}, Screenshots: ${app.screenshotUrls ? app.screenshotUrls.length : 0}, iPad Screenshots: ${app.ipadScreenshotUrls ? app.ipadScreenshotUrls.length : 0}`);
+//ACF Fields
+  newData = {
+    app_name: app.trackName,
+    app_apple_rating: app.averageUserRating,
+    app_developer: app.sellerName,
+    app_description: app.description,
+    app_ios_link: app.trackViewUrl,
+    app_icon_url: app.artworkUrl512 || app.artworkUrl100,
+    app_cost: app.formattedPrice,
+    app_apple_id: app.trackId,
+    app_version: app.version,
+    app_age_rating: app.contentAdvisoryRating,
+    app_device_families: (app.supportedDevices || []).join(", "),
+    app_genres: (app.genres || []).join(", "),
+    app_primary_genre: app.primaryGenreName,
+    app_privacy_policy_url: app.privacyPolicyUrl,
+    official_website: app.sellerUrl,
+    app_languages: (app.languageCodesISO2A || []).join(", "),
+    app_release_date: app.releaseDate,
+    app_whats_new: app.releaseNotes,
+    
+    //New screenshot logic
+    app_screenshots: (() => {
+      if (app.screenshotUrls && app.screenshotUrls.length > 0) {
+        return app.screenshotUrls.join(", ");
+      } else if (app.ipadScreenshotUrls && app.ipadScreenshotUrls.length > 0) {
+        return app.ipadScreenshotUrls.join(", ");
+      } else {
+        return `No screenshots available for ${app.trackName}`;
+      }
+    })()
+  };
+
+
+      } else if (store === 'google') {
+        const url = `https://app-store-and-google-play-api.p.rapidapi.com/v1/google-play/app-details/${encodeURIComponent(appId)}?country=us&language=en`;
+        const options = {
+          method: "get",
+          headers: {
+            "x-rapidapi-key": "#Your Rapid Key API#",
+            "x-rapidapi-host": "app-store-and-google-play-api.p.rapidapi.com"
+          }
+        };
+
+        const response = UrlFetchApp.fetch(url, options);
+        const app = JSON.parse(response.getContentText()).data;
+
+        if (!app) {
+          Logger.log(`No data for Google app ID ${appId}`);
+          continue;
+        }
+        newData = {
+          app_name: app.title,
+          app_google_rating: app.rating,
+          app_developer: app.developer_name,
+          app_description: app.description,
+          app_icon_url: app.icon,
+          app_cost: app.price_formatted || "Free",
+          app_google_package: app.bundle_id,
+          app_version: app.latest_version,
+          app_age_rating: app.pegi,
+          app_genres: (app.categories || []).join(", "),
+          app_primary_genre: app.primary_category,
+          app_privacy_policy_url: app.privacy_policy_url,
+          official_website: app.developer_site,
+          app_languages: (app.languages || []).join(", "),
+          app_release_date: app.publish_date,
+          app_whats_new: app.whats_new,
+          app_screenshots: (app.screenshot || [])[0] || "No screenshot available",
+          app_device_families: (app.device_families || []).join(", ")
+        };
+      }
+
+      // Write data back into the same row
+      for (let i = 0; i < headers.length; i++) {
+        const fieldName = headers[i];
+        if (newData.hasOwnProperty(fieldName)) {
+          sheet.getRange(row, i + 1).setValue(newData[fieldName]);
+        }
+      }
+
+      // Update last_updated and update_flag
+      if (headers.includes("last_updated")) {
+        sheet.getRange(row, headers.indexOf("last_updated") + 1).setValue(new Date());
+      }
+      if (headers.includes("update_flag")) {
+        sheet.getRange(row, headers.indexOf("update_flag") + 1).setValue("UPDATED");
+      }
+
+    } catch (err) {
+      Logger.log(`Error processing row ${row}: ${err.message}`);
+      sheet.getRange(row, headers.indexOf('app_name') + 1).setValue(`ERROR: ${err.message}`);
+    }
+  }
+}
+
