@@ -1,0 +1,107 @@
+#-- Code for pulling Reddit Groups --#
+const REDDIT_CONFIG = {
+  clientId: "YOUR_REDDIT_CLIENTID",
+  clientSecret: "YOUR_REDDIT_CLIENTSECRET", 
+  userAgent: "YOUR_USERAGENT"
+};
+
+// Get Reddit OAuth token
+function getRedditToken() {
+  const credentials = Utilities.base64Encode(REDDIT_CONFIG.clientId + ':' + REDDIT_CONFIG.clientSecret);
+  
+  const options = {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Basic ' + credentials,
+      'User-Agent': REDDIT_CONFIG.userAgent,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    payload: 'grant_type=client_credentials'
+  };
+  
+  const response = UrlFetchApp.fetch('https://www.reddit.com/api/v1/access_token', options);
+  const data = JSON.parse(response.getContentText());
+  return data.access_token;
+}
+
+// Get subreddit information
+function getSubredditInfo(subredditName, accessToken) {
+  const url = `https://oauth.reddit.com/r/${subredditName}/about`;
+  
+  const options = {
+    method: 'GET',
+    headers: {
+      'Authorization': 'Bearer ' + accessToken,
+      'User-Agent': REDDIT_CONFIG.userAgent
+    }
+  };
+  
+  const response = UrlFetchApp.fetch(url, options);
+  const data = JSON.parse(response.getContentText());
+  const sub = data.data;
+  
+  return {
+    subreddit_name: sub.display_name,
+    group_name: sub.display_name,
+    website_url: `https://reddit.com/r/${sub.display_name}`,
+    is_public: sub.subreddit_type === 'public',
+    subscriber_count: sub.subscribers || 0, 
+    description: sub.public_description || sub.description || '',
+    community_icon: sub.community_icon || sub.icon_img || ''
+  };
+}
+
+// Main sync function
+function syncGroupData() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const lastRow = sheet.getLastRow();
+  
+  const redditToken = getRedditToken();
+  
+  for (let row = 2; row <= lastRow; row++) {
+    const rowValues = sheet.getRange(row, 1, 1, headers.length).getValues()[0];
+    
+    // Find website column and check if it's Reddit
+    const websiteCol = headers.indexOf('website');
+    if (websiteCol === -1 || rowValues[websiteCol]?.toString().toLowerCase() !== 'reddit') {
+      continue;
+    }
+    
+    // Get subreddit name from subreddit_name & putting "reddit" Under website column
+    let subredditName = '';
+    const groupNameCol = headers.indexOf('group_name');
+    const subredditNameCol = headers.indexOf('subreddit_name');
+    
+    if (groupNameCol !== -1 && rowValues[groupNameCol]) {
+      subredditName = rowValues[groupNameCol].toString();
+    } else if (subredditNameCol !== -1 && rowValues[subredditNameCol]) {
+      subredditName = rowValues[subredditNameCol].toString();
+    }
+    
+    if (!subredditName) continue;
+    
+    // Clean the subreddit name
+    subredditName = subredditName.replace(/^r\//, '').trim();
+    
+    // Fetch and update data
+    try {
+      const newData = getSubredditInfo(subredditName, redditToken);
+      
+      // Update columns based on headers
+      Object.keys(newData).forEach(fieldName => {
+        const colIndex = headers.indexOf(fieldName);
+        if (colIndex !== -1) {
+          sheet.getRange(row, colIndex + 1).setValue(newData[fieldName]);
+        }
+      });
+      
+      Logger.log(`Updated r/${subredditName} - Subscribers: ${newData.subscriber_count}`);
+      
+    } catch (error) {
+      Logger.log(`Error processing r/${subredditName}: ${error.message}`);
+    }
+    
+    
+  }
+}
