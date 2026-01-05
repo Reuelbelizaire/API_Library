@@ -1,0 +1,259 @@
+/** 
+* SyncCharityData - Fetches charity data from Charity Navigator API and populates spreadsheet
+ * 
+ * PREREQUISITES:
+ * - Sheet must have these columns: cause, database, filter_state, ein, name, organization_url,
+ *   mission, street, street2, city, state, zip, country, encompass_score, 
+ *   encompass_star_rating, last_updated, update_flag
+ * 
+ * HOW TO USE:
+ * 1. Fill in the 'cause' column with charity causes (e.g., "Eye diseases, Cancer")
+ * 2. Fill in 'database' column with "charitynavigator"
+ * 3. (Optional) Fill in 'filter_state' column with state codes (e.g., "FL, GA, NY")
+ * 4. Run this function
+ * 5. Results will populate automatically with all charity details
+ * 
+ * FEATURES:
+ * - Searches multiple causes (comma-separated: "Cancer, Heart disease")
+ * - Filters by multiple states (comma-separated: "FL, CA, NY")
+ * - Fetches up to 14,000 charities per search
+ * - Prevents duplicate processing via update_flag
+ * - Auto-converts text fields to lowercase for consistency
+ * 
+ * API CREDENTIALS:
+ * - Uses Charity Navigator GraphQL API
+ * - Token stored in code (line 23)
+ * 
+ * Made By Reuel Belizaire
+ * @version 1.0
+ * @date December 2025
+ */
+function SyncCharityData() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]; 
+  let lastRow = sheet.getLastRow();  
+  
+  // Loop through each row starting from row 2 (row 1 is headers)
+  for (let row = 182; row <= lastRow; row++) {
+    // Read all values in the current row
+    let rowValues = sheet.getRange(row, 1, 1, headers.length).getValues()[0];
+    // search parameters from columns
+    let database = (rowValues[headers.indexOf('database')] || '').toLowerCase();
+    let searchCause = rowValues[headers.indexOf('cause')]; 
+    let searchState = rowValues [headers.indexOf('filter_state')]
+    let updateFlag = rowValues[headers.indexOf('update_flag')];
+
+    // Skip rows that have already been processed to avoid duplication
+    if (updateFlag === 'UPDATED' || updateFlag === 'NO RESULTS') {
+      Logger.log(`Skipping row ${row} - already processed`);
+      continue;
+    }
+    // As of right now we're only using charitynavigator but this is incase you want to add another API to this existing code
+    if (!searchCause || database !== 'charitynavigator') {
+      continue;
+    }
+
+    try {
+      // Charity Navigator API credentials
+      const token = '***';
+      const url = 'https://api.charitynavigator.org/graphql';
+      //so we can search multiple causes we will do it by splitting up the search using comma
+      const causesArray = searchCause.split(',').map(c => c.trim()).filter(c => c.length > 0); 
+      // we use null because searching by state is optional || we search by using intial of states (capital letters)
+      const statesArray = searchState ? searchState.split(',').map(s => s.trim().toUpperCase()).filter(s => s.length > 0) : null; 
+
+      Logger.log(`Searching for causes: ${causesArray.join(', ')}`);
+    
+      //we're using GraphQL query so we must define which fields to retrieve from the API
+      const query = `
+        query PublicSearchFaceted($term: String!, $causes: [String!]!,$states: [String!], $result_size: Int!, $from: Int!) {
+          publicSearchFaceted(
+            term: $term
+            causes: $causes
+            states: $states
+            result_size: $result_size
+            from: $from
+          ) {
+            result_count
+            results {
+              ein
+              name
+              organization_url
+              mission
+              street
+              street2
+              city
+              state
+              zip
+              country
+              encompass_score
+              encompass_star_rating
+              cause
+            }
+          }
+        }
+      `;
+      
+      let allResults = [];
+      let from = 0;
+      const batchSize = 250;  // How many results to fetch per API call
+      const maxResults = 14000;  // Maximum total results to fetch
+
+      // Fetch results in batches until we reach maxResults or run out of data  
+      while (from < maxResults) {
+        const options = {
+          'method': 'post',
+          'headers': {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          'payload': JSON.stringify({
+            query: query,
+            variables: {
+              term: "",  // Empty term - we're filtering by cause and state only
+              causes: causesArray,  //using array for multiple cause search
+              states: statesArray, // search by state using the intials 
+              result_size: batchSize,
+              from: from
+            }
+          }),
+          'muteHttpExceptions': true
+        };
+        
+        const response = UrlFetchApp.fetch(url, options);
+        const responseCode = response.getResponseCode();
+        
+        Logger.log(`Response code: ${responseCode}`);
+
+        // Handle API errors
+        if (responseCode !== 200) {
+          Logger.log(`Error response: ${response.getContentText()}`);
+          throw new Error(`API returned ${responseCode}: ${response.getContentText()}`);
+        }
+        
+        const apiResponse = JSON.parse(response.getContentText());
+        const batchResults = apiResponse.data?.publicSearchFaceted?.results || [];
+        const totalCount = apiResponse.data?.publicSearchFaceted?.result_count || 0;
+        
+        Logger.log(`Total available: ${totalCount} | Fetched batch: ${batchResults.length} | Total so far: ${allResults.length + batchResults.length}`);
+
+        // Stop if no more results
+        if (batchResults.length === 0) {
+          Logger.log('No more results available');
+          break;
+        }
+        
+        allResults = allResults.concat(batchResults);
+        from += batchSize;
+        
+        if (allResults.length >= totalCount || allResults.length >= maxResults) {
+          Logger.log(`Stopping. Fetched ${allResults.length} results`);
+          break;
+        }
+        
+        // added a delay to avoid rate limiting        
+        Utilities.sleep(500);
+      }
+      
+      const results = allResults;
+      Logger.log(`FINAL: ${results.length} charities for causes: ${causesArray.join(', ')}`);
+      
+      if (results.length === 0) {
+        sheet.getRange(row, headers.indexOf("update_flag") + 1).setValue("NO RESULTS");
+        continue;
+      }
+
+      // Clear the original search row (prevents reprocessing)
+      sheet.getRange(row, 1, 1, headers.length).clearContent();
+
+      if (results.length > 1) {
+        sheet.insertRowsAfter(row, results.length - 1);
+      }
+
+      for (let i = 0; i < results.length; i++) {
+        const dB = results[i];
+        const currentRow = row + i;
+
+        // Map API response fields to spreadsheet columns
+        // Text fields are converted to lowercase for consistency by adding ".toLowerCase()"
+        const charityData = {
+          cause: searchCause,  
+          database: database,
+          filter_state: searchState || '', 
+          ein: dB.ein || '',
+          name: dB.name || '',
+          organization_url: dB.organization_url ? dB.organization_url.toLowerCase() : '',
+          street: dB.street ? dB.street.toLowerCase() : '', //makes it lower case
+          street: dB.street.toLowerCase() || '',
+          street2: dB.street2 || '',
+          city: dB.city.toLowerCase() || '',
+          state: dB.state || '',
+          zip: dB.zip || '',
+          country: dB.country || '',
+          encompass_score: dB.encompass_score || '',
+          encompass_star_rating: dB.encompass_star_rating || '',
+          last_updated: new Date(),
+          update_flag: 'UPDATED'
+        };
+
+        // Write data to spreadsheet columns
+        for (let col = 0; col < headers.length; col++) {
+          const fieldName = headers[col];
+          if (charityData.hasOwnProperty(fieldName)) {
+            sheet.getRange(currentRow, col + 1).setValue(charityData[fieldName]);
+          }
+        }
+      }
+
+      lastRow = sheet.getLastRow();
+      row = row + results.length - 1;
+
+    } catch (err) {
+      Logger.log(`Error: ${err.message}`);
+      if (headers.includes("update_flag")) {
+        sheet.getRange(row, headers.indexOf("update_flag") + 1).setValue(`ERROR: ${err.message}`);
+      }
+    }
+    
+    Utilities.sleep(1000);
+  }
+}
+
+
+function TestACFFields() {
+  const token = '****';
+  const url = 'https://api.charitynavigator.org/graphql';
+  
+  const fieldsToTest = [
+    'ein', 'orgID', 'charityName', 'name', 'tagLine', 
+    'websiteURL', 'organization_url', 'charityNavigatorURL', 'mission',
+    'phoneNumber', 'generalEmail', 'category' ,'categoryID', 'categoryName',
+    'deductibility', 'deductibilityCode' ,'nteeCode', 'nteeClassification' ,'exemptOrgStatus', 'exemptOrgStatusCode' ,'assetAmount',
+    'incomeAmount', 'latest990', 'mailingAddress', 'street', 'street2', 'state' ,'city' ,'encompass_score', 'encompass_star_rating',
+    'cause' , 'zip', 'country'
+  ]; // put fields into an array
+  
+  const valid = []; //puts valid arrays in here and not valid below
+  const invalid = [];
+  
+  for (const field of fieldsToTest) {
+    const query = `query { publicSearchFaceted(term: "eye disease", result_size: 1, from: 0) { results { ${field} } } }`;  //set up a quick query by looking up term and by checking if each field gives me info back
+    const options = {
+      'method': 'post',
+      'headers': { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      'payload': JSON.stringify({ query: query }),
+      'muteHttpExceptions': true
+    }; //change depending on API url and info
+    
+    const response = UrlFetchApp.fetch(url, options);
+    if (response.getContentText().includes('errors')) {
+      invalid.push(field);
+    } else {
+      valid.push(field);
+    }
+    Utilities.sleep(100);
+  }
+  
+  Logger.log('✅ VALID FIELDS: ' + valid.join(', '));
+  Logger.log('❌ INVALID FIELDS: ' + invalid.join(', '));
+}
