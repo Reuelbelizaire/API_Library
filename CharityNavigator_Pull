@@ -34,7 +34,7 @@ function SyncCharityData() {
   let lastRow = sheet.getLastRow();  
   
   // Loop through each row starting from row 2 (row 1 is headers)
-  for (let row = 182; row <= lastRow; row++) {
+  for (let row = 2; row <= lastRow; row++) {
     // Read all values in the current row
     let rowValues = sheet.getRange(row, 1, 1, headers.length).getValues()[0];
     // search parameters from columns
